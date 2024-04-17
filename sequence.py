@@ -12,16 +12,12 @@ from Bio.SeqRecord import SeqRecord
 
 import os
 
-from localcider.sequenceParameters import SequenceParameters
-import tqdm as tqdm
 import warnings
 
 from joblib import load
 
 import numba as nb
 from scipy.integrate import quad
-
-from calvados import analysis, interactions
 
 ### SEQUENCE INPUT / OUTPUT
 def read_fasta(ffasta):
@@ -288,7 +284,7 @@ def mc_towards_kappa(seq,k_target=0.2,nsteps=100,dip_target=0.,a_kappa=1.,a_dip=
     ks = np.zeros((nsteps))
     dips = np.zeros((nsteps))
     umin = 10000.
-    for idx in tqdm(range(nsteps)):
+    for idx in range(nsteps):
         seqtemp = seq
         cswp = False
         for i in range(nswaps):
@@ -453,58 +449,6 @@ def ikj_loop_ah(N,rs,sig_map,l_map,eps,rc,maxdist):
     U = U / (N*(N-1)/2 + N)
     return U
 
-## q pairs
-def q_pairs(seq,residues,r0=0.6,beta=0.5,maxdist=100,temp=293,ionic=0.15,rc_yu=4.0):
-
-    seq = list(seq)
-    N = len(seq)
-
-    # distances
-    xs = np.arange(N+1)
-    rs = r0*xs**beta # nm
-
-    # q maps
-    eps_yu, k_yu = interactions.genParamsDH(temp,ionic)
-    q_map = make_q_map(seq,residues) * eps_yu**2
-
-    U = ikj_loop_q(N,rs,q_map,k_yu,rc_yu,maxdist)
-    return U
-
-def make_q_map(seq,residues):
-    seq = list(seq)
-    qs = residues.loc[seq,'q'].to_numpy()
-    q_map = np.multiply.outer(qs,qs)
-    return q_map
-
-@nb.jit(nopython=True)
-def ikj_loop_q(N,rs,q_map,k_yu,rc_yu,maxdist):
-    U = 0
-    for i in range(N):
-        for k in range(N):
-            for j in range(max(0,k-maxdist),min(N,k+maxdist+1)):
-                r = rs[abs(k-j)+1]
-                q = q_map[i,j] # includes eps_yu**2
-                if abs(q) > 0.:
-                    u = analysis.yukawa_potential(r,q,k_yu,rc_yu=rc_yu)
-                    U = U + u
-    U = U / (N*(N-1)/2 + N)
-    return U
-
-def ah_single(seq,residues,rc=2.,eps=0.2*4.184,r0=0.6,beta=0.5):
-    """ Sequence hydropathy decoration, eq. 4 in Zheng et al., JPC Letters 2020"""
-
-    seq = list(seq)
-    N = len(seq)
-
-    # distances
-    xs = np.arange(N+1)
-    rs = r0*xs**beta # nm
-
-    # sigma, lambda maps
-    sig_map, l_map = make_sig_lambda_map(seq,residues)
-    U = ij_loop_ah(N,rs,sig_map,l_map,eps,rc)
-    return U
-
 @nb.jit(nopython=True)
 def ij_loop_ah(N,rs,sig_map,l_map,eps,rc):
     U = 0
@@ -517,30 +461,6 @@ def ij_loop_ah(N,rs,sig_map,l_map,eps,rc):
             U = U + u
     U = U / N
     return U
-
-# @nb.jit(nopython=True)
-# def make_sig_lambda_map(seq,sig_keys,l_keys):
-#     N = len(seq)
-#     sig_map = np.zeros((N,N))
-#     l_map = np.zeros((N,N))
-
-#     for i in range(N):
-#         for j in range(N):
-#             sig_map[i,j] = sig_keys[(seq[i],seq[j])]
-#             l_map[i,j] = l_keys[(seq[i],seq[j])]
-#     return sig_map, l_map
-
-# def make_sig_lambda_keys(residues):#,rc=2.0,eps = 0.2 * 4.184):
-#     sig_keys = {}
-#     l_keys = {}
-#     for key0, val0 in residues.iterrows():
-#         sig0, l0 = val0['sigmas'], val0['lambdas']
-#         for key1, val1 in residues.iterrows():
-#             sig1, l1 = val1['sigmas'], val1['lambdas']
-#             sig, l = 0.5*(sig0+sig1), 0.5*(l0+l1)
-#             sig_keys[(key0,key1)] = sig
-#             l_keys[(key1,key0)] = l
-#     return sig_keys, l_keys
 
 def ah_scaled(r,sig,eps,l,rc):
     ah = ah_potential(r,sig,eps,l,rc)
@@ -572,74 +492,7 @@ def calc_ah_ij(seq,ah_intgrl_map):
     U /= (N * (N-1) / 2. + N)
     return U
 
-def yu_scaled(r,q,k_yu,rc_yu=4.):
-    yu = analysis.yukawa_potential(r,q,k_yu,rc_yu=rc_yu)
-    yus = yu*4*np.pi*r**2
-    return yus
-
-def make_q_intgrl_map(residues,temp=293.,ionic=0.15,rc_yu=4.):
-    q_intgrl_map = {}
-    eps_yu, k_yu = interactions.genParamsDH(temp,ionic)
-    for key0, val0 in residues.iterrows():
-        q0, sig0 = val0['q'], val0['sigmas']
-        for key1, val1 in residues.iterrows():
-            q1, sig1 = val1['q'], val1['sigmas']
-            q = q0*q1 * eps_yu**2
-            sig = 0.5*(sig0+sig1)
-            res = quad(lambda r: yu_scaled(r,q,k_yu,rc_yu=rc_yu), 2**(1./6.)*sig, rc_yu)
-            q_intgrl_map[(key0,key1)] = res[0]
-            q_intgrl_map[(key1,key0)] = res[0]
-    return q_intgrl_map
-
-def calc_q_ij(seq,q_intgrl_map):
-    U = 0.
-    seq = list(seq)
-    N = len(seq)
-    for idx in range(N):
-        seqi = seq[idx]
-        for jdx in range(idx,N):
-            seqj = seq[jdx]
-            u = q_intgrl_map[(seqi,seqj)]
-            U += u
-    U /= (N * (N-1) / 2. + N)
-    return U
-
-# def calc_ah_patch(seq,ah_map,beta=1.):
-#     """ Patchiness """
-#     seq = list(seq)
-#     N = len(seq)
-#     xs = np.arange(N)
-
-#     ahij = np.zeros((N,N))
-
-#     for idx in range(N):
-#         seqi = seq[idx]
-#         for jdx in range(N):
-#             seqj = seq[jdx]
-#             ahij[idx,jdx] = ah_map[(seqi,seqj)]
-
-#     r = (np.abs(np.subtract.outer(xs,xs))+1)**beta
-
-#     U = get_U(N,ahij,r)
-#     U /= (N*(N-1) / 2 + N)
-#     return U
-
-# def calc_ah_shd(seq,ah_map,beta=-1.):
-#     """ Sequence hydropathy decoration, eq. 4 in Zheng et al., JPC Letters 2020"""
-#     N = len(seq)
-#     ah_shd = 0.
-#     for idx in range(1,N):
-#         x = seq[idx]
-#         for jdx in range(0,idx):
-#             y = seq[jdx]
-#             ahi = ah_map[(x,y)]
-#             s = ahi * (idx - jdx)**beta
-#             ah_shd += s
-#     ah_shd /= N
-#     return ah_shd
-
 ############ MANUAL KAPPA ################
-
 
 @nb.jit(nopython=True)
 def check_dmax(seq,dmax,seqmax):
@@ -859,15 +712,6 @@ class SeqFeatures:
             if ah_intgrl_map is None:
                 ah_intgrl_map = make_ah_intgrl_map(residues)
             self.ah_ij = calc_ah_ij(seq,ah_intgrl_map)
-            # self.ah_patch = calc_ah_patch(seq,ah_map,beta=1.)
-            # self.ah_shd = calc_ah_shd(seq,ah_map,beta=-1.)
-
-            # self.ah_single = ah_single(seq,residues,beta=0.5)
-            # self.ah_pairs = ah_pairs(seq,residues,beta=0.5)
-            # self.q_pairs = q_pairs(seq,residues,beta=0.5)
-
-            # q_intgrl_map = make_q_intgrl_map(residues)
-            # self.q_ij = calc_q_ij(seq,q_intgrl_map)
             
         if nu_file is not None:
             self.kappa = calc_kappa_manual(seq)
@@ -875,3 +719,4 @@ class SeqFeatures:
             model_nu = load(nu_file)
             X_nu = np.reshape(np.array(feats_for_nu),(1,-1))
             self.nu_svr = model_nu.predict(X_nu)[0]
+
